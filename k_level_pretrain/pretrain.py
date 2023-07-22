@@ -65,7 +65,7 @@ def load_kge_embeddings(emb_path):
     with open(f'{emb_path}/relation_embedding_.pkl', 'rb') as f:
         relation_embedding = pickle.load(f)
     
-    return torch.tensor(entity_embedding), torch.tensor(relation_embedding)
+    return entity_embedding.clone().detach(), relation_embedding.clone().detach()
 
 
 # Get subgraph
@@ -78,13 +78,9 @@ def get_subgraph(G_tg, molecule_mask, center_molecule_id, motifs, ent_type):
     masked_node_ids = edge_subgraph.edge_index[0] # (num_masked_nodes,)
     motif_labels = motifs[center_molecule_id] # (num_masked_nodes, motif_len)
     node_labels = ent_type[masked_node_ids] # (num_masked_nodes, num_ent_type)
-    rel_ids = subgraph.relation # (num_masked_edges,)
-    rel_labels 
-
 
     subgraph.masked_node_ids = masked_node_ids
-    subgraph.rel_labels = rel_labels
-    subgraph.center_molecule_id = center_molecule_id
+    subgraph.center_molecule_id = torch.where(masked_node_ids == center_molecule_id)[0][0]
     subgraph.motif_labels = motif_labels
     subgraph.node_labels = node_labels
 
@@ -123,7 +119,7 @@ def get_dataloader(G_tg, center_molecule_ids, molecule_mask, motifs, ent_type, b
     return train_loader, val_loader
 
 
-def train(model, train_loader, device, optimizer):
+def train(model, train_loader, device, optimizer, run=None):
     model.train()
     training_loss = 0
     tot_loss = 0
@@ -134,22 +130,29 @@ def train(model, train_loader, device, optimizer):
         optimizer.zero_grad()
 
         # Forward
-        edge_class, motif_pred, node_class = model(data.masked_node_ids, data.rel_labels, data.center_molecule_id, data.edge_index)
+        edge_class, motif_pred, node_class = model(data.masked_node_ids, data.relation, data.center_molecule_id, data.edge_index)
 
+        motif_labels = data.motif_labels.reshape(int(train_loader.batch_size), int(len(data.motif_labels)/train_loader.batch_size)).float()
         # Loss
-        loss = model.loss(edge_class, motif_pred, node_class, data.rel_labels, data.motif_labels, data.node_labels)
+        loss, edge_loss, motif_loss, node_class_loss = model.loss(edge_class, motif_pred, node_class, data.rel_label, motif_labels, data.node_labels)
 
         # Backward
         loss.backward()
         training_loss = loss
         tot_loss += loss
         optimizer.step()
-    
+        run["train/step_loss"].append(training_loss)
+        run["train/step_edge_loss"].append(edge_loss)
+        run["train/step_motif_loss"].append(motif_loss)
+        run["train/step_node_class_loss"].append(node_class_loss)
+
     return tot_loss
 
 
-def validate(model, val_loader, device):
+def validate(model, val_loader, device, run=None):
     model.eval()
+    val_loss = 0
+    tot_loss = 0
     y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_true_edge_all, y_true_motif_all, y_true_node_all = [], [], [], [], [], []
 
     pbar = tqdm(enumerate(val_loader), total=len(val_loader))
@@ -158,9 +161,11 @@ def validate(model, val_loader, device):
         data = data.to(device)
 
         # Forward
-        edge_class, motif_pred, node_class = model(data.masked_node_ids, data.rel_labels, data.center_molecule_id, data.edge_index)
+        edge_class, motif_pred, node_class = model(data.masked_node_ids, data.relation, data.center_molecule_id, data.edge_index)
+
+        motif_labels = data.motif_labels.reshape(int(val_loader.batch_size), int(len(data.motif_labels)/val_loader.batch_size)).float()
         # Loss
-        loss = model.loss(edge_class, motif_pred, node_class, data.rel_labels, data.motif_labels, data.node_labels)
+        loss, edge_loss, motif_loss, node_class_loss = model.loss(edge_class, motif_pred, node_class, data.rel_label, motif_labels, data.node_labels)
 
         val_loss = loss
         tot_loss += loss
@@ -169,7 +174,10 @@ def validate(model, val_loader, device):
         y_prob_motif = F.sigmoid(motif_pred, dim=-1)
         y_prob_node = F.softmax(node_class, dim=-1)
 
-        y_true_edge, y_true_motifs, y_true_node = data.rel_labels, data.motif_labels, data.node_labels
+        node_labels = data.node_labels.reshape(int(val_loader.batch_size), int(len(data.node_labels)/val_loader.batch_size)).float()
+        rel_label = data.rel_label.reshape(int(val_loader.batch_size), int(len(data.rel_label)/val_loader.batch_size)).float()
+
+        y_true_edge, y_true_motifs, y_true_node = rel_label, motif_labels, node_labels
 
         y_prob_edge_all.append(y_prob_edge)
         y_prob_motif_all.append(y_prob_motif)
@@ -178,6 +186,10 @@ def validate(model, val_loader, device):
         y_true_motif_all.append(y_true_motifs)
         y_true_node_all.append(y_true_node)
 
+        run["val/step_loss"].append(val_loss)
+        run["val/step_edge_loss"].append(edge_loss)
+        run["val/step_motif_loss"].append(motif_loss)
+        run["val/step_node_class_loss"].append(node_class_loss)
     
     return tot_loss, y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_true_edge_all, y_true_motif_all, y_true_node_all
 
@@ -218,8 +230,8 @@ def train_loop(model, train_loader, val_loader, optimizer, device, epochs, logge
     best_f1 = 0
     early_stop_indicator = 0
     for epoch in range(1, epochs+1):
-        train_loss = train(model, train_loader, device, optimizer)
-        valid_loss, y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_true_edge_all, y_true_motif_all, y_true_node_all = validate(model, val_loader, device)
+        train_loss = train(model, train_loader, device, optimizer, run=run)
+        valid_loss, y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_true_edge_all, y_true_motif_all, y_true_node_all = validate(model, val_loader, device, run=run)
         
         y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_true_edge_all, y_true_motif_all, y_true_node_all = detach_numpy(y_prob_edge_all), detach_numpy(y_prob_motif_all), detach_numpy(y_prob_node_all), detach_numpy(y_true_edge_all), detach_numpy(y_true_motif_all), detach_numpy(y_true_node_all)
 
@@ -238,7 +250,7 @@ def train_loop(model, train_loader, val_loader, optimizer, device, epochs, logge
             if early_stop_indicator >= early_stop:
                 break
         if run is not None:
-            run["train/loss"].append(train_loss)
+            run["train/epoch_loss"].append(train_loss)
             run["val/loss"].append(valid_loss)
             run["val/edge_pr_auc"].append(edge_val_pr_auc)
             run["val/edge_roc_auc"].append(edge_val_roc_auc)
@@ -333,7 +345,7 @@ def run():
     )
 
     # Train
-    device = torch.device('cuda:1')
+    device = torch.device('cuda:4')
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)

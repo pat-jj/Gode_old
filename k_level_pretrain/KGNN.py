@@ -66,8 +66,9 @@ class KGNN(torch.nn.Module):
 
     def loss(self, edge_pred, motif_pred, node_class, edge_label, motif_label, node_label):
         edge_loss = F.cross_entropy(edge_pred, edge_label)
-        motif_loss = F.binary_cross_entropy_with_logits(motif_pred, motif_label)
         node_class_loss = F.cross_entropy(node_class, node_label)
+        motif_loss = F.binary_cross_entropy_with_logits(motif_pred, motif_label)
+        loss = self.lambda_edge * edge_loss + self.lambda_motif * motif_loss + self.lambda_node_class * node_class_loss
 
         # Here, you can also include weights for each task if desired
-        return self.lambda_edge * edge_loss + self.lambda_motif * motif_loss + self.lambda_node_class * node_class_loss
+        return loss, edge_loss, motif_loss, node_class_loss
