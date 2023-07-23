@@ -1,3 +1,7 @@
 /data_process
 /dataset_construction
 data.zip
+.neptune
+/k_level_pretrain/training_logs
+/k_level_pretrain/,neptune
+/k_level_pretrain/.ipynb_checkpoints
