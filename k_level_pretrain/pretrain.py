@@ -21,9 +21,9 @@ import logging
 
 # Neptune API token
 NEPTUNE_KEY = os.environ['NEPTUNE_API_TOKEN']
-KHOP = 3
+KHOP = 2
 DEVICE = 4
-KGE = False
+KGE = True
 
 # Get everything we prepared
 def get_everything(data_path):
@@ -64,9 +64,9 @@ def get_everything(data_path):
 def load_kge_embeddings(emb_path):
     # Load KGE embeddings
     print('Loading KGE embeddings...')
-    with open(f'{emb_path}/entity_embedding_.pkl', 'rb') as f:
+    with open(f'{emb_path}/entity_embedding_1200.pkl', 'rb') as f:
         entity_embedding = pickle.load(f)
-    with open(f'{emb_path}/relation_embedding_.pkl', 'rb') as f:
+    with open(f'{emb_path}/relation_embedding_1200.pkl', 'rb') as f:
         relation_embedding = pickle.load(f)
     
     return entity_embedding.clone().detach(), relation_embedding.clone().detach()
@@ -82,7 +82,7 @@ def get_k_hop_nodes(node_index, num_hops, edge_index):
     return node_idx_k_hop
 
 # Get subgraph
-def get_subgraph(G_tg, molecule_mask, center_molecule_id, motifs, ent_type):
+def get_subgraph(G_tg, center_molecule_id, motifs, ent_type):
     masked_node_ids = get_k_hop_nodes(int(center_molecule_id), KHOP-1, G_tg.edge_index)
     subgraph = G_tg.subgraph(masked_node_ids)
     motif_labels = motifs[center_molecule_id]  # (num_masked_nodes, motif_len)
@@ -133,7 +133,6 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return get_subgraph(
             G_tg=self.G_tg, 
-            molecule_mask=self.molecule_mask, 
             center_molecule_id=self.center_molecule_ids[idx], 
             motifs=self.motifs, 
             ent_type=self.ent_type
@@ -154,13 +153,18 @@ def get_dataloader(G_tg, center_molecule_ids, molecule_mask, motifs, ent_type, b
     return train_loader, val_loader
 
 
-def train(model, train_loader, device, optimizer, run=None):
+def train(model, train_loader, val_loader, device, optimizer, run=None):
     model.train()
     training_loss = 0
     tot_loss = 0
     pbar = tqdm(enumerate(train_loader), total=len(train_loader))
     for i, data in pbar:
         pbar.set_description(f'loss: {training_loss}')
+        if len(data.edge_index[0]) == 0:
+            continue
+        elif len(data.edge_index[0]) > 100000:
+            continue
+
         data = data.to(device)
         optimizer.zero_grad()
 
@@ -187,6 +191,9 @@ def train(model, train_loader, device, optimizer, run=None):
         run["train/step_node_class_loss"].append(node_class_loss)
         run["train/step_binary_loss"].append(binary_loss)
 
+        if i != 0 and i % 6000 == 0:
+            validate(model, val_loader, device, run=run)
+
     return tot_loss
 
 
@@ -199,6 +206,11 @@ def validate(model, val_loader, device, run=None):
     pbar = tqdm(enumerate(val_loader), total=len(val_loader))
     for i, data in pbar:
         pbar.set_description(f'loss: {val_loss}')
+        if len(data.edge_index[0]) == 0:
+            continue
+        elif len(data.edge_index[0]) > 100000:
+            continue
+
         data = data.to(device)
         with torch.no_grad():   
 
@@ -241,6 +253,12 @@ def validate(model, val_loader, device, run=None):
             y_true_node_all.append(y_true_node)
             y_true_binary_all.append(y_true_binary)
 
+            run["val/step_loss"].append(val_loss)
+            run["val/step_edge_loss"].append(edge_loss)
+            run["val/step_motif_loss"].append(motif_loss)
+            run["val/step_node_class_loss"].append(node_class_loss)
+            run["val/step_binary_loss"].append(binary_loss)
+
     
     y_prob_edge_all = np.concatenate(y_prob_edge_all, axis=0)
     y_prob_motif_all = np.concatenate(y_prob_motif_all, axis=0)
@@ -250,6 +268,7 @@ def validate(model, val_loader, device, run=None):
     y_true_motif_all = np.concatenate(y_true_motif_all, axis=0)
     y_true_node_all = np.concatenate(y_true_node_all, axis=0)
     y_true_binary_all = np.concatenate(y_true_binary_all, axis=0)
+    model.train()
     
     return tot_loss, y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_prob_binary_all, y_true_edge_all, y_true_motif_all, y_true_node_all, y_true_binary_all
 
@@ -353,62 +372,66 @@ def train_loop(model, train_loader, val_loader, optimizer, device, epochs, logge
     best_f1 = 0
     early_stop_indicator = 0
     for epoch in range(1, epochs+1):
-        train_loss = train(model, train_loader, device, optimizer, run=run)
-        torch.save(model.state_dict(), f'/data/pj20/molkg/kgnn_last_{KHOP}_hops_kge_{KGE}.pkl')
-        try:
-            valid_loss, y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_prob_binary_all, y_true_edge_all, y_true_motif_all, y_true_node_all, y_true_binary_all = validate(model, val_loader, device, run=run)
+        train_loss = train(model, train_loader, val_loader, device, optimizer, run=run)
+        torch.save(model.state_dict(), f'/data/pj20/molkg/kgnn_last_{KHOP}_hops_kge_{KGE}_1200.pkl')
 
-            edge_val_pr_auc, edge_val_roc_auc, edge_val_jaccard, edge_val_acc, edge_val_f1, edge_val_precision, edge_val_recall = metric_calculation(y_prob_edge_all, y_true_edge_all, mode="multiclass")
-            motif_val_pr_auc, motif_val_roc_auc, motif_val_jaccard, motif_val_acc, motif_val_f1, motif_val_precision, motif_val_recall = metric_calculation(y_prob_motif_all, y_true_motif_all, mode="multilabel")
-            node_val_pr_auc, node_val_roc_auc, node_val_jaccard, node_val_acc, node_val_f1, node_val_precision, node_val_recall = metric_calculation(y_prob_node_all, y_true_node_all, mode="multiclass")
-            binary_val_pr_auc, binary_val_roc_auc, binary_val_jaccard, binary_val_acc, binary_val_f1, binary_val_precision, binary_val_recall = metric_calculation(y_prob_binary_all, y_true_binary_all, mode="binary")
+        valid_loss, y_prob_edge_all, y_prob_motif_all, y_prob_node_all, y_prob_binary_all, y_true_edge_all, y_true_motif_all, y_true_node_all, y_true_binary_all = validate(model, val_loader, device, run=run)
 
-            if motif_val_pr_auc >= best_pr_auc:
-                torch.save(model.state_dict(), f'/data/pj20/molkg/kgnn_best_{KHOP}_hops_kge_{KGE}.pkl')
-                print("best model saved")
-                best_pr_auc = motif_val_pr_auc
-                early_stop_indicator = 0
-                # best_f1 = val_f1
-            else:
-                early_stop_indicator += 1
-                if early_stop_indicator >= early_stop:
-                    break
-            if run is not None:
-                run["train/epoch_loss"].append(train_loss)
-                run["val/loss"].append(valid_loss)
-                run["val/edge_pr_auc"].append(edge_val_pr_auc)
-                run["val/edge_roc_auc"].append(edge_val_roc_auc)
-                run["val/edge_acc"].append(edge_val_acc)
-                run["val/edge/f1"].append(edge_val_f1)
-                run["val/edge/precision"].append(edge_val_precision)
-                run["val/edge/recall"].append(edge_val_recall)
-                run["val/edge/jaccard"].append(edge_val_jaccard)
-                run["val/motif_pr_auc"].append(motif_val_pr_auc)
-                run["val/motif_roc_auc"].append(motif_val_roc_auc)
-                run["val/motif_acc"].append(motif_val_acc)
-                run["val/motif/f1"].append(motif_val_f1)
-                run["val/motif/precision"].append(motif_val_precision)
-                run["val/motif/recall"].append(motif_val_recall)
-                run["val/motif/jaccard"].append(motif_val_jaccard)
-                run["val/node_pr_auc"].append(node_val_pr_auc)
-                run["val/node_roc_auc"].append(node_val_roc_auc)
-                run["val/node_acc"].append(node_val_acc)
-                run["val/node/f1"].append(node_val_f1)
-                run["val/node/precision"].append(node_val_precision)
-                run["val/node/recall"].append(node_val_recall)
-                run["val/node/jaccard"].append(node_val_jaccard)
-                run["val/binary_pr_auc"].append(binary_val_pr_auc)
-                run["val/binary_roc_auc"].append(binary_val_roc_auc)
-                run["val/binary_acc"].append(binary_val_acc)
-                run["val/binary/f1"].append(binary_val_f1)
-                run["val/binary/precision"].append(binary_val_precision)
-                run["val/binary/recall"].append(binary_val_recall)
-                run["val/binary/jaccard"].append(binary_val_jaccard)
-        except:
-            pass
+        print("calculating metrics for edge prediction...")
+        edge_val_pr_auc, edge_val_roc_auc, edge_val_jaccard, edge_val_acc, edge_val_f1, edge_val_precision, edge_val_recall = metric_calculation(y_prob_edge_all, y_true_edge_all, mode="multiclass")
+        print("calculating metrics for motif prediction...")
+        motif_val_pr_auc, motif_val_roc_auc, motif_val_jaccard, motif_val_acc, motif_val_f1, motif_val_precision, motif_val_recall = metric_calculation(y_prob_motif_all, y_true_motif_all, mode="multilabel")
+        print("calculating metrics for node prediction...")
+        node_val_pr_auc, node_val_roc_auc, node_val_jaccard, node_val_acc, node_val_f1, node_val_precision, node_val_recall = metric_calculation(y_prob_node_all, y_true_node_all, mode="multiclass")
+        print("calculating metrics for binary prediction...")
+        binary_val_pr_auc, binary_val_roc_auc, binary_val_jaccard, binary_val_acc, binary_val_f1, binary_val_precision, binary_val_recall = metric_calculation(y_prob_binary_all, y_true_binary_all, mode="binary")
+
+        if motif_val_pr_auc >= best_pr_auc:
+            torch.save(model.state_dict(), f'/data/pj20/molkg/kgnn_best_{KHOP}_hops_kge_{KGE}_1200.pkl')
+            print("best model saved")
+            best_pr_auc = motif_val_pr_auc
+            early_stop_indicator = 0
+            # best_f1 = val_f1
+        else:
+            early_stop_indicator += 1
+            if early_stop_indicator >= early_stop:
+                break
+
+        if run is not None:
+            run["train/epoch_loss"].append(train_loss)
+            run["val/loss"].append(valid_loss)
+            run["val/edge_pr_auc"].append(edge_val_pr_auc)
+            run["val/edge_roc_auc"].append(edge_val_roc_auc)
+            run["val/edge_acc"].append(edge_val_acc)
+            run["val/edge/f1"].append(edge_val_f1)
+            run["val/edge/precision"].append(edge_val_precision)
+            run["val/edge/recall"].append(edge_val_recall)
+            run["val/edge/jaccard"].append(edge_val_jaccard)
+            run["val/motif_pr_auc"].append(motif_val_pr_auc)
+            run["val/motif_roc_auc"].append(motif_val_roc_auc)
+            run["val/motif_acc"].append(motif_val_acc)
+            run["val/motif/f1"].append(motif_val_f1)
+            run["val/motif/precision"].append(motif_val_precision)
+            run["val/motif/recall"].append(motif_val_recall)
+            run["val/motif/jaccard"].append(motif_val_jaccard)
+            run["val/node_pr_auc"].append(node_val_pr_auc)
+            run["val/node_roc_auc"].append(node_val_roc_auc)
+            run["val/node_acc"].append(node_val_acc)
+            run["val/node/f1"].append(node_val_f1)
+            run["val/node/precision"].append(node_val_precision)
+            run["val/node/recall"].append(node_val_recall)
+            run["val/node/jaccard"].append(node_val_jaccard)
+            run["val/binary_pr_auc"].append(binary_val_pr_auc)
+            run["val/binary_roc_auc"].append(binary_val_roc_auc)
+            run["val/binary_acc"].append(binary_val_acc)
+            run["val/binary/f1"].append(binary_val_f1)
+            run["val/binary/precision"].append(binary_val_precision)
+            run["val/binary/recall"].append(binary_val_recall)
+            run["val/binary/jaccard"].append(binary_val_jaccard)
+
             
-        if logger is not None:
-            logger.info(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {valid_loss:.4f}, Val ROC-AUC: {motif_val_roc_auc:.4f}, Val F1: {motif_val_f1:.4f}, Val Precision: {motif_val_precision:.4f}, Val Recall: {motif_val_recall:.4f}, Val Jaccard: {motif_val_jaccard:.4f}')
+            if logger is not None:
+                logger.info(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {valid_loss:.4f}, Val ROC-AUC: {motif_val_roc_auc:.4f}, Val F1: {motif_val_f1:.4f}, Val Precision: {motif_val_precision:.4f}, Val Recall: {motif_val_recall:.4f}, Val Jaccard: {motif_val_jaccard:.4f}')
 
 
 def get_logger(lr, hidden_dim, epochs, lambda_):
@@ -437,7 +460,7 @@ def run():
 
     params = {
         "lr": 1e-4,
-        "hidden_dim": 200,
+        "hidden_dim": 1200,
         "epochs": 100,
         "lambda": "08_15_10",
         "k-hop": KHOP,
@@ -462,6 +485,7 @@ def run():
     emb_path = '/data/pj20/molkg_kge/transe'
     print('Loading KGE embeddings...')
     entity_embedding, relation_embedding = load_kge_embeddings(emb_path)
+    # entity_embedding, relation_embedding = None, None
 
     # Initialize model
     print('Initializing model...')
@@ -470,14 +494,17 @@ def run():
         rel_emb=relation_embedding if KGE else None,
         num_nodes=ent_type.shape[0],
         num_rels=39,
-        embedding_dim=512,
-        hidden_dim=200,
+        embedding_dim=1200,
+        hidden_dim=1200,
         num_motifs=motifs.shape[1],
         lambda_edge=1.5,
         lambda_motif=1.8,
         lambda_mol_class=1.5,
         lambda_binary=1,
     )
+
+    # # Load the last saved model
+    # model.load_state_dict(torch.load(f'/data/pj20/molkg/kgnn_last_{KHOP}_hops_kge_{KGE}.pkl'))
 
     # Train
     device = torch.device(f'cuda:{DEVICE}' if torch.cuda.is_available() else 'cpu')

@@ -48,14 +48,14 @@ train_loader = get_dataloader(train_dataset, batch_size=128, shuffle=True)
 # initialize a KGE model
 model = TransE(
     dataset=umls_ds,
-    e_dim=512, 
-    r_dim=512, 
+    e_dim=1200, 
+    r_dim=1200, 
 )
 
 print('Loaded model: ', model)
 
-state_dict = torch.load("/data/pj20/molkg_kge/transe/molkg_transe_512/last.ckpt")
-model.load_state_dict(state_dict)
+# state_dict = torch.load("/data/pj20/molkg_kge/transe/molkg_transe_1200/last.ckpt")
+# model.load_state_dict(state_dict)
 
 # initialize a trainer and start training
 trainer = Trainer(
@@ -63,7 +63,7 @@ trainer = Trainer(
     device='cuda:5', 
     metrics=['hits@n', 'mean_rank'], 
     output_path='/data/pj20/molkg_kge/transe',
-    exp_name='molkg_transe_512'
+    exp_name='molkg_transe_1200'
     )
 
 trainer.train(
@@ -78,8 +78,8 @@ trainer.train(
 )
 
 # save the entity embedding and relation embedding
-with open("/data/pj20/molkg_kge/transe/entity_embedding.pkl", "wb") as f:
+with open("/data/pj20/molkg_kge/transe/entity_embedding_1200.pkl", "wb") as f:
     pickle.dump(model.E_emb, f)
 
-with open("/data/pj20/molkg_kge/transe/relation_embedding.pkl", "wb") as f:
+with open("/data/pj20/molkg_kge/transe/relation_embedding_1200.pkl", "wb") as f:
     pickle.dump(model.R_emb, f)

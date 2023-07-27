@@ -40,7 +40,7 @@ class KGNN(torch.nn.Module):
         self.binary_pred_layer = torch.nn.Linear(hidden_dim, 1)
 
 
-    def forward(self, node_ids, rel_ids, center_mol_idx, non_molecule_node_ids, edge_index):
+    def forward(self, node_ids, rel_ids, center_mol_idx, non_molecule_node_ids, edge_index, batch=None, output_emb=False):
         # x, edge_index, batch = data.x, data.edge_index, data.batch
         x = self.node_emb(node_ids).float()
         x = F.normalize(x, p=2, dim=1)
@@ -53,6 +53,9 @@ class KGNN(torch.nn.Module):
         x = self.conv1(x, edge_index, edge_attr)
         x = x.relu()
         x = self.conv2(x, edge_index, edge_attr)
+
+        if output_emb:
+            return x[center_mol_idx], global_mean_pool(x, batch=batch)  # return the embedding of the center molecule and the whole graph embedding
 
         # For edge prediction, we concatenate the embeddings of the two nodes for each edge
         edge_pred_input = torch.cat([x[edge_index[0]], x[edge_index[1]]], dim=1)

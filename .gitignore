@@ -5,3 +5,4 @@ data.zip
 /k_level_pretrain/training_logs
 /k_level_pretrain/,neptune
 /k_level_pretrain/.ipynb_checkpoints
+/contrastive_learning/data.json
