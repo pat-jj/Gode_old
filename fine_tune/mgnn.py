@@ -42,33 +42,108 @@ def load_checkpoint(path):
     return m_gnn
 
 
-class GroverContrastive(nn.Module):
+class GroverFinetuneTask(nn.Module):
     """
-    GroverFpGeneration class.
-    It loads the pre-trained model and produce the fingerprints for input molecules.
+    The finetune
     """
     def __init__(self, args):
-        """
-        Init function.
-        :param args: the arguments.
-        """
-        super(GroverContrastive, self).__init__()
+        super(GroverFinetuneTask, self).__init__()
 
-        args.dropout = 0.0
-        args.cuda = True
-        self.args = args
+        self.hidden_size = args.hidden_size
+        self.iscuda = args.cuda
 
         self.grover = GROVEREmbedding(args)
-        self.readout = Readout(rtype="mean", hidden_size=1200)
 
-    def forward(self, batch):
+        if args.self_attention:
+            self.readout = Readout(rtype="self_attention", hidden_size=self.hidden_size,
+                                   attn_hidden=args.attn_hidden,
+                                   attn_out=args.attn_out)
+        else:
+            self.readout = Readout(rtype="mean", hidden_size=self.hidden_size)
+
+        self.mol_atom_from_atom_ffn = self.create_ffn(args)
+        self.mol_atom_from_bond_ffn = self.create_ffn(args)
+
+        self.classification = args.dataset_type == 'classification'
+        if self.classification:
+            self.sigmoid = nn.Sigmoid()
+
+    def create_ffn(self, args: Namespace):
         """
-        The forward function.
-        It takes graph batch and molecular feature batch as input and produce the fingerprints of this molecules.
-        :param batch:
-        :param features_batch:
-        :return:
+        Creates the feed-forward network for the model.
+
+        :param args: Arguments.
         """
+        # Note: args.features_dim is set according the real loaded features data
+        if args.features_only:
+            first_linear_dim = args.features_size + args.features_dim
+        else:
+            if args.self_attention:
+                first_linear_dim = args.hidden_size * args.attn_out
+
+                first_linear_dim += args.features_dim
+            else:
+                first_linear_dim = args.hidden_size + args.features_dim
+
+        dropout = nn.Dropout(args.dropout)
+        activation = get_activation_function(args.activation)
+        # TODO: ffn_hidden_size
+        # Create FFN layers
+        if args.ffn_num_layers == 1:
+            ffn = [
+                dropout,
+                nn.Linear(first_linear_dim, args.output_size)
+            ]
+        else:
+            ffn = [
+                dropout,
+                nn.Linear(first_linear_dim, args.ffn_hidden_size)
+            ]
+            for _ in range(args.ffn_num_layers - 2):
+                ffn.extend([
+                    activation,
+                    dropout,
+                    nn.Linear(args.ffn_hidden_size, args.ffn_hidden_size),
+                ])
+            ffn.extend([
+                activation,
+                dropout,
+                nn.Linear(args.ffn_hidden_size, args.output_size),
+            ])
+
+        # Create FFN model
+        return nn.Sequential(*ffn)
+
+    @staticmethod
+    def get_loss_func(args):
+        def loss_func(preds, targets,
+                      dt=args.dataset_type,
+                      dist_coff=args.dist_coff):
+
+            if dt == 'classification':
+                pred_loss = nn.BCEWithLogitsLoss(reduction='none')
+            elif dt == 'regression':
+                pred_loss = nn.MSELoss(reduction='none')
+            else:
+                raise ValueError(f'Dataset type "{args.dataset_type}" not supported.')
+
+            # print(type(preds))
+            # TODO: Here, should we need to involve the model status? Using len(preds) is just a hack.
+            if type(preds) is not tuple:
+                # in eval mode.
+                return pred_loss(preds, targets)
+
+            # in train mode.
+            dist_loss = nn.MSELoss(reduction='none')
+
+            dist = dist_loss(preds[0], preds[1])
+            pred_loss1 = pred_loss(preds[0], targets)
+            pred_loss2 = pred_loss(preds[1], targets)
+            return pred_loss1 + pred_loss2 + dist_coff * dist
+
+        return loss_func
+
+    def forward(self, batch, features_batch):
         _, _, _, _, _, a_scope, _, _ = batch
 
         output = self.grover(batch)
@@ -76,7 +151,34 @@ class GroverContrastive(nn.Module):
         mol_atom_from_bond_output = self.readout(output["atom_from_bond"], a_scope)
         mol_atom_from_atom_output = self.readout(output["atom_from_atom"], a_scope)
 
-        return mol_atom_from_bond_output, mol_atom_from_atom_output
+        if features_batch[0] is not None:
+            features_batch = torch.from_numpy(np.stack(features_batch)).float()
+            if self.iscuda:
+                features_batch = features_batch.cuda()
+            features_batch = features_batch.to(output["atom_from_atom"])
+            if len(features_batch.shape) == 1:
+                features_batch = features_batch.view([1, features_batch.shape[0]])
+        else:
+            features_batch = None
+
+
+        if features_batch is not None:
+            mol_atom_from_atom_output = torch.cat([mol_atom_from_atom_output, features_batch], 1)
+            mol_atom_from_bond_output = torch.cat([mol_atom_from_bond_output, features_batch], 1)
+
+        if self.training:
+            atom_ffn_output = self.mol_atom_from_atom_ffn(mol_atom_from_atom_output)
+            bond_ffn_output = self.mol_atom_from_bond_ffn(mol_atom_from_bond_output)
+            return atom_ffn_output, bond_ffn_output
+        else:
+            atom_ffn_output = self.mol_atom_from_atom_ffn(mol_atom_from_atom_output)
+            bond_ffn_output = self.mol_atom_from_bond_ffn(mol_atom_from_bond_output)
+            if self.classification:
+                atom_ffn_output = self.sigmoid(atom_ffn_output)
+                bond_ffn_output = self.sigmoid(bond_ffn_output)
+            output = (atom_ffn_output + bond_ffn_output) / 2
+
+        return output
 
 
 

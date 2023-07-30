@@ -136,9 +136,10 @@ def train(model, train_loader, val_loader, device, optimizer, run=None):
                 run["train/loss_m_a_emb"].append(loss_2)
                 run["train/loss"].append(loss_tot)
 
-            if i != 0 and i % 3000 == 0:
+            if i != 0 and i % 30000 == 0:
                 validate(model, val_loader, device, run=run)
         except:
+            training_loss = 0
             continue
 
     return tot_loss
